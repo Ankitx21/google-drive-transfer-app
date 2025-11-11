@@ -11,7 +11,7 @@ from google.auth.transport.requests import Request
 # --------------------------------------------------------------
 st.set_page_config(page_title="Drive Transfer Pro", layout="centered")
 st.title("Google Drive Transfer Pro")
-st.markdown("### **Old to New Gmail — Full Copy with Logs**")
+st.markdown("### **Old to New Gmail — Full Copy with Live Logs**")
 
 hide = "<style>#MainMenu,footer,header{visibility:hidden;}</style>"
 st.markdown(hide, unsafe_allow_html=True)
@@ -121,34 +121,31 @@ if hasattr(st.session_state, "dst_email"):
 if not (hasattr(st.session_state, "src_service") and hasattr(st.session_state, "dst_service")):
     st.stop()
 
-# Initialize log
+# Initialize
 if "log" not in st.session_state:
     st.session_state.log = []
+    st.session_state.processed = 0
+    st.session_state.total = 0
+    st.session_state.status = "Ready"
 
-def log_success(msg):
-    st.session_state.log.append(f"Checkmark **{msg}**")
-    st.toast(msg, icon="Checkmark")
+# Live Log Container
+log_container = st.container()
+status_placeholder = st.empty()
+progress_bar = st.progress(0)
 
-def log_error(msg):
-    st.session_state.log.append(f"X **{msg}**")
-    st.toast(msg, icon="X")
+def log(msg, icon=""):
+    st.session_state.log.append(f"{icon} {msg}")
+    with log_container:
+        st.markdown(f"{icon} {msg}", unsafe_allow_html=True)
 
-def log_info(msg):
-    st.session_state.log.append(f"**{msg}**")
-
-# Rate limiter
-def wait():
-    if not hasattr(st.session_state, "last_call"):
-        st.session_state.last_call = 0
-    now = time.time()
-    delay = max(0, 0.11 - (now - st.session_state.last_call))
-    time.sleep(delay)
-    st.session_state.last_call = time.time()
+def update_status(msg):
+    st.session_state.status = msg
+    status_placeholder.info(msg)
 
 def api_call(fn, *a, **k):
     for _ in range(5):
         try:
-            wait()
+            time.sleep(0.11)  # Rate limit
             return fn(*a, **k).execute()
         except HttpError as e:
             if e.resp.status in (429,500,502,503,504):
@@ -157,37 +154,33 @@ def api_call(fn, *a, **k):
                 raise
     raise
 
-# Share file
 def share_file(src_svc, file_id, email):
     try:
         api_call(src_svc.permissions().create, fileId=file_id,
                  body={"type": "user", "role": "writer", "emailAddress": email},
                  sendNotificationEmail=False, supportsAllDrives=True)
-    except: pass
+    except Exception as e:
+        log(f"Share failed: {e}", "Warning")
 
-# Copy item
 def copy_item(src_id, dst_parent, path, src_svc, dst_svc, email):
-    if st.session_state.get("stop_transfer"): return
+    if st.session_state.get("stop_transfer", False):
+        return
 
     try:
         meta = api_call(src_svc.files().get, fileId=src_id, fields="id,name,mimeType,size", supportsAllDrives=True)
         name, mime = meta["name"], meta["mimeType"]
         full_path = f"{path}/{name}" if path else name
 
-        # Update status
-        st.session_state.status = f"Transferring: **{full_path}**"
-        st.rerun()
+        update_status(f"Transferring: **{full_path}**")
 
         share_file(src_svc, src_id, email)
 
         if mime == "application/vnd.google-apps.folder":
-            # Create folder
             folder = api_call(dst_svc.files().create,
                               body={"name": name, "mimeType": mime, "parents": [dst_parent]},
                               fields="id", supportsAllDrives=True)
             new_id = folder["id"]
 
-            # Get children
             children = []
             page_token = None
             while True:
@@ -199,21 +192,24 @@ def copy_item(src_id, dst_parent, path, src_svc, dst_svc, email):
                 page_token = resp.get("nextPageToken")
                 if not page_token: break
 
-            log_info(f"Folder: {full_path} ({len(children)} items)")
+            log(f"Folder: {full_path} ({len(children)} items)", "Folder")
 
             for child in children:
                 copy_item(child["id"], new_id, full_path, src_svc, dst_svc, email)
 
-            log_success(f"Folder transferred: {full_path}")
+            log(f"Folder transferred: {full_path}", "Checkmark")
 
         else:
             api_call(dst_svc.files().copy, fileId=src_id,
                      body={"parents": [dst_parent]}, supportsAllDrives=True)
             size = meta.get("size", "—")
-            log_success(f"File transferred: {full_path} ({size} B)")
+            log(f"File transferred: {full_path} ({size} B)", "Checkmark")
+
+        st.session_state.processed += 1
+        progress_bar.progress(st.session_state.processed / st.session_state.total)
 
     except Exception as e:
-        log_error(f"Failed: {full_path} → {str(e)}")
+        log(f"Failed: {full_path} → {str(e)}", "X")
 
 # --------------------------------------------------------------
 # 7. Start Transfer
@@ -221,16 +217,17 @@ def copy_item(src_id, dst_parent, path, src_svc, dst_svc, email):
 if st.button("START FULL TRANSFER", type="primary", use_container_width=True):
     st.session_state.stop_transfer = False
     st.session_state.log = []
-    st.session_state.status = "Starting..."
     st.session_state.processed = 0
-    st.session_state.total = 0
-    st.balloons()
+    st.session_state.status = "Scanning..."
+    log_container.empty()
+    status_placeholder.empty()
+    progress_bar.progress(0)
 
     src = st.session_state.src_service
     dst = st.session_state.dst_service
     email = st.session_state.dst_email
 
-    # Count total items
+    update_status("Scanning My Drive...")
     items = []
     page_token = None
     while True:
@@ -242,49 +239,43 @@ if st.button("START FULL TRANSFER", type="primary", use_container_width=True):
         page_token = resp.get("nextPageToken")
         if not page_token: break
 
-    # Add Shared Drives
+    update_status("Scanning Shared Drives...")
     drives = api_call(src.drives().list, pageSize=100, fields="drives(id,name)").get("drives", [])
     for d in drives:
         items.append({"id": d["id"], "name": d["name"], "mimeType": "application/vnd.google-apps.folder"})
 
     st.session_state.total = len(items)
-    prog = st.progress(0)
-    status_placeholder = st.empty()
+    log(f"Found {len(items)} root items to transfer", "MagnifyingGlass")
 
     for idx, item in enumerate(items):
-        if st.session_state.get("stop_transfer"): break
-        status_placeholder.info(st.session_state.get("status", ""))
+        if st.session_state.get("stop_transfer", False):
+            log("Transfer stopped by user", "StopSign")
+            break
         copy_item(item["id"], "root", "", src, dst, email)
-        st.session_state.processed = idx + 1
-        prog.progress((idx + 1) / len(items))
-        st.rerun()
 
-    if not st.session_state.get("stop_transfer"):
+    if not st.session_state.get("stop_transfer", False):
         st.success("**TRANSFER COMPLETE!**")
         st.balloons()
     else:
-        st.warning("Transfer stopped by user.")
-
-# --------------------------------------------------------------
-# 8. Live Log Display
-# --------------------------------------------------------------
-if st.session_state.get("log"):
-    st.markdown("### Transfer Log")
-    log_container = st.container()
-    with log_container:
-        for entry in st.session_state.log:
-            st.markdown(entry, unsafe_allow_html=True)
-
-# Status
-if "status" in st.session_state:
-    st.caption(st.session_state.status)
-
-# Progress
-if st.session_state.get("total", 0) > 0:
-    st.progress(st.session_state.processed / st.session_state.total)
-    st.caption(f"**{st.session_state.processed} / {st.session_state.total}** items")
+        st.warning("Transfer stopped.")
 
 # Stop Button
 if st.button("STOP TRANSFER", type="secondary"):
     st.session_state.stop_transfer = True
     st.rerun()
+
+# Live Status
+if st.session_state.get("status"):
+    status_placeholder.info(st.session_state.status)
+
+# Progress
+if st.session_state.get("total", 0) > 0:
+    progress_bar.progress(st.session_state.processed / st.session_state.total)
+    st.caption(f"**{st.session_state.processed} / {st.session_state.total}** items processed")
+
+# Live Log
+if st.session_state.get("log"):
+    st.markdown("### Live Transfer Log")
+    with log_container:
+        for entry in st.session_state.log:
+            st.markdown(entry, unsafe_allow_html=True)
