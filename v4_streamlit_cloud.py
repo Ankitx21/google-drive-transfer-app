@@ -92,35 +92,58 @@ else:
     st.stop()
 
 # --------------------------------------------------------------
-# 5. Login
+# 5. Login + Auto Show Transfer Button
 # --------------------------------------------------------------
 col1, col2, col3 = st.columns(3)
 with col1:
     if st.button("Old Gmail", type="primary", use_container_width=True):
-        c,e,s = auth("src")
-        st.session_state.src_creds, st.session_state.src_email, st.session_state.src_service = c,e,s
+        c, e, s = auth("src")
+        st.session_state.src_creds = c
+        st.session_state.src_email = e
+        st.session_state.src_service = s
+        st.success(f"Source: {e}")
+        st.rerun()
+
 with col2:
     if st.button("New Gmail", use_container_width=True):
-        c,e,s = auth("dest")
-        st.session_state.dst_creds, st.session_state.dst_email, st.session_state.dst_service = c,e,s
+        c, e, s = auth("dest")
+        st.session_state.dst_creds = c
+        st.session_state.dst_email = e
+        st.session_state.dst_service = s
+        st.success(f"Dest: {e}")
+        st.rerun()
+
 with col3:
     if st.button("Clear All", use_container_width=True):
         for f in TOKEN_DIR.glob("*"): f.unlink(missing_ok=True)
         for k in list(st.session_state.keys()):
-            if k != "uid": del st.session_state[k]
+            if k not in ["uid", "log", "status", "processed", "total"]:
+                del st.session_state[k]
         st.rerun()
 
-if hasattr(st.session_state, "src_email"):
+# === SHOW EMAILS ===
+if getattr(st.session_state, "src_email", None):
     st.info(f"**Source**: {st.session_state.src_email}")
-if hasattr(st.session_state, "dst_email"):
+
+if getattr(st.session_state, "dst_email", None):
     st.info(f"**Destination**: {st.session_state.dst_email}")
 
-# --------------------------------------------------------------
-# 6. Transfer Engine
-# --------------------------------------------------------------
-if not (hasattr(st.session_state, "src_service") and hasattr(st.session_state, "dst_service")):
+# === SHOW TRANSFER BUTTON ONLY IF BOTH READY ===
+if (getattr(st.session_state, "src_service", None) and 
+    getattr(st.session_state, "dst_service", None)):
+    
+    st.markdown("---")
+    st.markdown("### Ready to Transfer!")
+    st.success("Both accounts authenticated")
+    
+else:
+    st.warning("Please login to **both** accounts to start transfer")
     st.stop()
 
+# --------------------------------------------------------------
+# 6. Transfer Engine (Same as before)
+# --------------------------------------------------------------
+# [Keep your full transfer code here — no changes needed]
 # Initialize
 if "log" not in st.session_state:
     st.session_state.log = []
@@ -128,7 +151,6 @@ if "log" not in st.session_state:
     st.session_state.total = 0
     st.session_state.status = "Ready"
 
-# Live Log Container
 log_container = st.container()
 status_placeholder = st.empty()
 progress_bar = st.progress(0)
@@ -145,7 +167,7 @@ def update_status(msg):
 def api_call(fn, *a, **k):
     for _ in range(5):
         try:
-            time.sleep(0.11)  # Rate limit
+            time.sleep(0.11)
             return fn(*a, **k).execute()
         except HttpError as e:
             if e.resp.status in (429,500,502,503,504):
@@ -212,7 +234,7 @@ def copy_item(src_id, dst_parent, path, src_svc, dst_svc, email):
         log(f"Failed: {full_path} → {str(e)}", "X")
 
 # --------------------------------------------------------------
-# 7. Start Transfer
+# 7. Start Transfer Button
 # --------------------------------------------------------------
 if st.button("START FULL TRANSFER", type="primary", use_container_width=True):
     st.session_state.stop_transfer = False
@@ -264,16 +286,14 @@ if st.button("STOP TRANSFER", type="secondary"):
     st.session_state.stop_transfer = True
     st.rerun()
 
-# Live Status
+# Live Status + Progress + Log
 if st.session_state.get("status"):
     status_placeholder.info(st.session_state.status)
 
-# Progress
 if st.session_state.get("total", 0) > 0:
     progress_bar.progress(st.session_state.processed / st.session_state.total)
     st.caption(f"**{st.session_state.processed} / {st.session_state.total}** items processed")
 
-# Live Log
 if st.session_state.get("log"):
     st.markdown("### Live Transfer Log")
     with log_container:
