@@ -1,6 +1,10 @@
 import streamlit as st
 import os, pickle, hashlib, time, atexit, math, random
 from pathlib import Path
+
+# CRITICAL FIX: Disable GCE metadata check (Streamlit Cloud bug)
+os.environ["NO_GCE_CHECK"] = "true"
+
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -315,3 +319,4 @@ if st.button("START FULL DRIVE TRANSFER", type="primary", use_container_width=Tr
         st.balloons()
     else:
         st.warning("Transfer stopped.")
+
