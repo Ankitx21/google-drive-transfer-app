@@ -2,8 +2,9 @@ import streamlit as st
 import os, pickle, hashlib, time, atexit, random
 from pathlib import Path
 
-# FINAL FIX: Disable GCE metadata checks
+# FINAL FIX: Bypass GCE metadata completely
 os.environ["NO_GCE_CHECK"] = "true"
+os.environ["GCE_METADATA_HOST"] = "metadata.google.internal"
 os.environ["GOOGLE_CLOUD_UNIVERSE_DOMAIN"] = "googleapis.com"
 
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -16,7 +17,7 @@ from google.auth.transport.requests import Request
 # --------------------------------------------------------------
 st.set_page_config(page_title="Drive Transfer", layout="centered")
 st.title("Google Drive Transfer")
-st.markdown("### Old → New Gmail (Full Copy)")
+st.markdown("### Old to New Gmail (Full Copy)")
 
 hide = "<style>#MainMenu,footer,header{visibility:hidden;}</style>"
 st.markdown(hide, unsafe_allow_html=True)
