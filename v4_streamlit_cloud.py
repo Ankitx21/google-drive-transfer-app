@@ -71,7 +71,7 @@ def auth(account):
                     creds = flow.credentials
                     with token_file.open("wb") as f:
                         pickle.dump(creds, f)
-                    st.success("Logged in!")
+                    st.success(f"Authenticated Successfully")
                 except Exception as e:
                     st.error(f"Error: {e}")
                     st.stop()
@@ -92,64 +92,77 @@ else:
     st.stop()
 
 # --------------------------------------------------------------
-# 5. Login + Auto Show Transfer Button
+# 5. Login Section (Always Show Buttons)
 # --------------------------------------------------------------
-col1, col2, col3 = st.columns(3)
+st.markdown("### 2. Login to Both Accounts")
+
+col1, col2 = st.columns(2)
+
 with col1:
-    if st.button("Old Gmail", type="primary", use_container_width=True):
+    st.markdown("#### Old Gmail (Source)")
+    if st.button("Login Old Gmail", type="primary", use_container_width=True):
         c, e, s = auth("src")
         st.session_state.src_creds = c
         st.session_state.src_email = e
         st.session_state.src_service = s
-        st.success(f"Source: {e}")
         st.rerun()
 
+    if getattr(st.session_state, "src_email", None):
+        st.success(f"Authenticated: **{st.session_state.src_email}**")
+
 with col2:
-    if st.button("New Gmail", use_container_width=True):
+    st.markdown("#### New Gmail (Destination)")
+    if st.button("Login New Gmail", use_container_width=True):
         c, e, s = auth("dest")
         st.session_state.dst_creds = c
         st.session_state.dst_email = e
         st.session_state.dst_service = s
-        st.success(f"Dest: {e}")
         st.rerun()
 
-with col3:
-    if st.button("Clear All", use_container_width=True):
-        for f in TOKEN_DIR.glob("*"): f.unlink(missing_ok=True)
-        for k in list(st.session_state.keys()):
-            if k not in ["uid", "log", "status", "processed", "total"]:
-                del st.session_state[k]
-        st.rerun()
+    if getattr(st.session_state, "dst_email", None):
+        st.success(f"Authenticated: **{st.session_state.dst_email}**")
 
-# === SHOW EMAILS ===
-if getattr(st.session_state, "src_email", None):
-    st.info(f"**Source**: {st.session_state.src_email}")
-
-if getattr(st.session_state, "dst_email", None):
-    st.info(f"**Destination**: {st.session_state.dst_email}")
-
-# === SHOW TRANSFER BUTTON ONLY IF BOTH READY ===
-if (getattr(st.session_state, "src_service", None) and 
-    getattr(st.session_state, "dst_service", None)):
-    
-    st.markdown("---")
-    st.markdown("### Ready to Transfer!")
-    st.success("Both accounts authenticated")
-    
-else:
-    st.warning("Please login to **both** accounts to start transfer")
-    st.stop()
+# Clear All Button
+if st.button("Clear All Logins", type="secondary"):
+    for f in TOKEN_DIR.glob("*"): f.unlink(missing_ok=True)
+    for k in list(st.session_state.keys()):
+        if k not in ["uid", "log", "status", "processed", "total"]:
+            del st.session_state[k]
+    st.rerun()
 
 # --------------------------------------------------------------
-# 6. Transfer Engine (Same as before)
+# 6. Transfer Controls (Always Visible)
 # --------------------------------------------------------------
-# [Keep your full transfer code here — no changes needed]
-# Initialize
+st.markdown("---")
+st.markdown("### 3. Transfer Controls")
+
+col_start, col_stop = st.columns(2)
+
+with col_start:
+    start_btn = st.button(
+        "START FULL TRANSFER",
+        type="primary",
+        use_container_width=True,
+        disabled=not (getattr(st.session_state, "src_service", None) and getattr(st.session_state, "dst_service", None))
+    )
+
+with col_stop:
+    stop_btn = st.button(
+        "STOP TRANSFER",
+        type="secondary",
+        use_container_width=True,
+        disabled=not st.session_state.get("transfer_running", False)
+    )
+
+# --------------------------------------------------------------
+# 7. Transfer Engine
+# --------------------------------------------------------------
 if "log" not in st.session_state:
     st.session_state.log = []
     st.session_state.processed = 0
     st.session_state.total = 0
     st.session_state.status = "Ready"
+    st.session_state.transfer_running = False
 
 log_container = st.container()
 status_placeholder = st.empty()
@@ -234,59 +247,68 @@ def copy_item(src_id, dst_parent, path, src_svc, dst_svc, email):
         log(f"Failed: {full_path} → {str(e)}", "X")
 
 # --------------------------------------------------------------
-# 7. Start Transfer Button
+# 8. Start Transfer
 # --------------------------------------------------------------
-if st.button("START FULL TRANSFER", type="primary", use_container_width=True):
-    st.session_state.stop_transfer = False
-    st.session_state.log = []
-    st.session_state.processed = 0
-    st.session_state.status = "Scanning..."
-    log_container.empty()
-    status_placeholder.empty()
-    progress_bar.progress(0)
-
-    src = st.session_state.src_service
-    dst = st.session_state.dst_service
-    email = st.session_state.dst_email
-
-    update_status("Scanning My Drive...")
-    items = []
-    page_token = None
-    while True:
-        resp = api_call(src.files().list,
-                        q="trashed=false and 'root' in parents",
-                        fields="nextPageToken, files(id,name,mimeType)",
-                        pageSize=1000, pageToken=page_token, supportsAllDrives=True)
-        items.extend(resp.get("files", []))
-        page_token = resp.get("nextPageToken")
-        if not page_token: break
-
-    update_status("Scanning Shared Drives...")
-    drives = api_call(src.drives().list, pageSize=100, fields="drives(id,name)").get("drives", [])
-    for d in drives:
-        items.append({"id": d["id"], "name": d["name"], "mimeType": "application/vnd.google-apps.folder"})
-
-    st.session_state.total = len(items)
-    log(f"Found {len(items)} root items to transfer", "MagnifyingGlass")
-
-    for idx, item in enumerate(items):
-        if st.session_state.get("stop_transfer", False):
-            log("Transfer stopped by user", "StopSign")
-            break
-        copy_item(item["id"], "root", "", src, dst, email)
-
-    if not st.session_state.get("stop_transfer", False):
-        st.success("**TRANSFER COMPLETE!**")
-        st.balloons()
+if start_btn:
+    if not (getattr(st.session_state, "src_service", None) and getattr(st.session_state, "dst_service", None)):
+        st.error("Please login to both accounts first.")
     else:
-        st.warning("Transfer stopped.")
+        st.session_state.stop_transfer = False
+        st.session_state.transfer_running = True
+        st.session_state.log = []
+        st.session_state.processed = 0
+        st.session_state.status = "Scanning..."
+        log_container.empty()
+        status_placeholder.empty()
+        progress_bar.progress(0)
 
-# Stop Button
-if st.button("STOP TRANSFER", type="secondary"):
+        src = st.session_state.src_service
+        dst = st.session_state.dst_service
+        email = st.session_state.dst_email
+
+        update_status("Scanning My Drive...")
+        items = []
+        page_token = None
+        while True:
+            resp = api_call(src.files().list,
+                            q="trashed=false and 'root' in parents",
+                            fields="nextPageToken, files(id,name,mimeType)",
+                            pageSize=1000, pageToken=page_token, supportsAllDrives=True)
+            items.extend(resp.get("files", []))
+            page_token = resp.get("nextPageToken")
+            if not page_token: break
+
+        update_status("Scanning Shared Drives...")
+        drives = api_call(src.drives().list, pageSize=100, fields="drives(id,name)").get("drives", [])
+        for d in drives:
+            items.append({"id": d["id"], "name": d["name"], "mimeType": "application/vnd.google-apps.folder"})
+
+        st.session_state.total = len(items)
+        log(f"Found {len(items)} root items to transfer", "MagnifyingGlass")
+
+        for idx, item in enumerate(items):
+            if st.session_state.get("stop_transfer", False):
+                log("Transfer stopped by user", "StopSign")
+                st.session_state.transfer_running = False
+                break
+            copy_item(item["id"], "root", "", src, dst, email)
+
+        if not st.session_state.get("stop_transfer", False):
+            st.success("**TRANSFER COMPLETE!**")
+            st.balloons()
+            st.session_state.transfer_running = False
+        else:
+            st.warning("Transfer stopped.")
+
+# Stop Transfer
+if stop_btn:
     st.session_state.stop_transfer = True
+    st.session_state.transfer_running = False
     st.rerun()
 
-# Live Status + Progress + Log
+# --------------------------------------------------------------
+# 9. Live UI
+# --------------------------------------------------------------
 if st.session_state.get("status"):
     status_placeholder.info(st.session_state.status)
 
