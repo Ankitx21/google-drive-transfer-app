@@ -17,7 +17,12 @@ st.markdown("### Transfer **ENTIRE** Google Drive → New Email")
 hide = "<style>#MainMenu,footer,header{visibility:hidden;}</style>"
 st.markdown(hide, unsafe_allow_html=True)
 
-st.caption("Note: After clicking the link, copy the code from Google (starts with `4/`) and paste it below.")
+st.caption("Note: After clicking the link, copy the code from Google (starts with `4/`) and paste it below. If you see 'site can't be reached', copy the code from the URL bar.")
+
+st.info("""
+**Troubleshooting 403 Errors:**  
+If you get "insufficient scopes" on transfer, click "Clear Login" below, then re-login to Source (old Gmail). This upgrades permissions for sharing files.
+""")
 
 # --------------------------------------------------------------
 # 2. Session Helpers
@@ -39,10 +44,9 @@ def _cleanup():
 atexit.register(_cleanup)
 
 # --------------------------------------------------------------
-# 3. OAuth (Manual Flow - 2025 Compliant)
+# 3. OAuth (Full Drive Scope for Both - Fixes 403)
 # --------------------------------------------------------------
-SCOPES_SRC = ["https://www.googleapis.com/auth/drive.readonly"]
-SCOPES_DST = ["https://www.googleapis.com/auth/drive"]
+SCOPES_FULL = ["https://www.googleapis.com/auth/drive"]  # Full access for source (needed for sharing) + dest
 
 def auth(account: str, scopes: List[str]):
     token_file = TOKEN_DIR / f"token_{USER_ID}_{account}.pkl"
@@ -116,21 +120,30 @@ else:
     st.stop()
 
 # --------------------------------------------------------------
-# 5. Login Buttons
+# 5. Login Buttons + Clear
 # --------------------------------------------------------------
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns([1, 1, 1])
 with col1:
     if st.button("Login **Old** Gmail", use_container_width=True, type="primary"):
         with st.spinner("Opening Google..."):
-            c, e, s = auth("src", SCOPES_SRC)
+            c, e, s = auth("src", SCOPES_FULL)  # Full scope for source
             st.session_state.src_creds, st.session_state.src_email, st.session_state.src_service = c, e, s
             st.success(f"Source: **{e}**")
 with col2:
     if st.button("Login **New** Gmail", use_container_width=True, type="secondary"):
         with st.spinner("Opening Google..."):
-            c, e, s = auth("dest", SCOPES_DST)
+            c, e, s = auth("dest", SCOPES_FULL)  # Full scope for dest
             st.session_state.dst_creds, st.session_state.dst_email, st.session_state.dst_service = c, e, s
             st.success(f"Destination: **{e}**")
+with col3:
+    if st.button("Clear Logins", use_container_width=True, type="secondary"):
+        for account in ["src", "dest"]:
+            token_file = TOKEN_DIR / f"token_{USER_ID}_{account}.pkl"
+            if token_file.exists():
+                token_file.unlink()
+        st.session_state.clear()  # Clears session vars
+        st.success("Logins cleared — re-login to continue")
+        st.rerun()
 
 if getattr(st.session_state, "src_email", None):
     st.info(f"**Source** → {st.session_state.src_email}")
@@ -228,8 +241,8 @@ def share_file(src_service, file_id: str, email: str):
             supportsAllDrives=True
         )
     except HttpError as e:
-        if "already" not in str(e).lower():
-            raise
+        if "already" not in str(e).lower() and "insufficientPermissions" not in str(e).lower():
+            raise  # Re-raise if not "already shared" or scopes issue
 
 def copy_item(src_id: str, dst_parent: str, path: str, src_svc, dst_svc, dest_email):
     if st.session_state.get("stop_transfer", False):
@@ -326,4 +339,4 @@ if st.button("START FULL DRIVE TRANSFER", type="primary", use_container_width=Tr
         st.success("FULL DRIVE TRANSFER COMPLETE!")
         st.balloons()
     else:
-        st.warning("Transfer stopped. Partial copy completed.") 
+        st.warning("Transfer stopped. Partial copy completed.")
