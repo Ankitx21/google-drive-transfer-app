@@ -2,19 +2,13 @@ import streamlit as st
 import os, pickle, hashlib, time, atexit, random
 from pathlib import Path
 
-# FINAL FIX: Bypass GCE metadata completely
-os.environ["NO_GCE_CHECK"] = "true"
-os.environ["GCE_METADATA_HOST"] = "metadata.google.internal"
-os.environ["GOOGLE_CLOUD_UNIVERSE_DOMAIN"] = "googleapis.com"
+# No os.environ needed with google-auth==2.34.0
 
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.auth.transport.requests import Request
 
-# --------------------------------------------------------------
-# 1. Page
-# --------------------------------------------------------------
 st.set_page_config(page_title="Drive Transfer", layout="centered")
 st.title("Google Drive Transfer")
 st.markdown("### Old to New Gmail (Full Copy)")
@@ -22,9 +16,6 @@ st.markdown("### Old to New Gmail (Full Copy)")
 hide = "<style>#MainMenu,footer,header{visibility:hidden;}</style>"
 st.markdown(hide, unsafe_allow_html=True)
 
-# --------------------------------------------------------------
-# 2. Session
-# --------------------------------------------------------------
 def uid():
     if "uid" not in st.session_state:
         st.session_state.uid = hashlib.sha256(str(time.time()).encode()).hexdigest()[:12]
@@ -41,9 +32,6 @@ def _cleanup():
     for p in TOKEN_DIR.glob(f"token_{USER_ID}*"): p.unlink(missing_ok=True)
 atexit.register(_cleanup)
 
-# --------------------------------------------------------------
-# 3. OAuth
-# --------------------------------------------------------------
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 def auth(account):
@@ -85,9 +73,6 @@ def auth(account):
     email = service.about().get(fields="user/emailAddress").execute()["user"]["emailAddress"]
     return creds, email, service
 
-# --------------------------------------------------------------
-# 4. Upload
-# --------------------------------------------------------------
 st.markdown("### 1. Upload `client_secrets.json`")
 uploaded = st.file_uploader("Web App JSON", type="json")
 if uploaded:
@@ -96,9 +81,6 @@ if uploaded:
 else:
     st.stop()
 
-# --------------------------------------------------------------
-# 5. Login
-# --------------------------------------------------------------
 col1, col2, col3 = st.columns(3)
 with col1:
     if st.button("Old Gmail", type="primary"):
@@ -122,9 +104,6 @@ if hasattr(st.session_state, "src_email"):
 if hasattr(st.session_state, "dst_email"):
     st.info(f"**Dest**: {st.session_state.dst_email}")
 
-# --------------------------------------------------------------
-# 6. Transfer
-# --------------------------------------------------------------
 if not (hasattr(st.session_state, "src_service") and hasattr(st.session_state, "dst_service")):
     st.stop()
 
@@ -142,7 +121,6 @@ def api_call(fn, *a, **k):
 status = st.empty()
 log = st.expander("Log", True)
 stop = st.button("STOP", type="secondary")
-
 if stop:
     st.session_state.stop_transfer = True
 
@@ -177,9 +155,6 @@ def copy_item(src_id, dst_parent, path, src_svc, dst_svc, email):
         api_call(dst_svc.files().copy, fileId=src_id, body={"parents": [dst_parent]}, supportsAllDrives=True)
         log.info(f"File: {cur}")
 
-# --------------------------------------------------------------
-# 7. Start
-# --------------------------------------------------------------
 if st.button("START TRANSFER", type="primary"):
     st.session_state.stop_transfer = False
     src, dst, email = st.session_state.src_service, st.session_state.dst_service, st.session_state.dst_email
