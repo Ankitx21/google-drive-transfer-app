@@ -332,3 +332,4 @@ if st.session_state.get("log"):
     with log_container:
         for entry in st.session_state.log:
             st.markdown(entry, unsafe_allow_html=True)
+
