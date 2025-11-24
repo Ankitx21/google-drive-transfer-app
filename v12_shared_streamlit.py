@@ -24,8 +24,8 @@ st.markdown("<style>#MainMenu,footer,header,.stDeployButton{display:none}</style
 with st.expander("1. Upload client_secrets.json (Web App)", expanded=True):
     client_file = st.file_uploader("Upload file", type="json")
 
-with st.expander("2. New Account Email (NEW)", expanded=True):
-    source_email = st.text_input("Email of the new owner", placeholder="newuser@company.com")
+with st.expander("2. Old Account Email (SOURCE)", expanded=True):
+    source_email = st.text_input("Email of the old/source", placeholder="olduser@company.com")
 
 with st.expander("3. Shared Folder Link or ID", expanded=True):
     folder_input = st.text_input("Folder link or ID", placeholder="https://drive.google.com/drive/folders/...")
@@ -262,4 +262,5 @@ if client_file and source_email and folder_id and "@" in source_email:
 
 else:
     st.info("Complete all 3 steps to begin")
+
 
