@@ -1,110 +1,184 @@
-# app.py – FINAL WORKING ON STREAMLIT CLOUD (2025)
+# app.py
 import streamlit as st
-import time, random, hashlib, atexit, re
+import time, random, hashlib, atexit
 from pathlib import Path
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.auth.transport.requests import Request
 import pickle
+import re
 
 # ================================
-# PAGE CONFIG
+# PAGE CONFIG & STYLE
 # ================================
-st.set_page_config(page_title="Drive Liberator Pro", layout="centered", page_icon="Rocket")
-st.title("Drive Liberator Pro")
-st.markdown("### Copy All Files Owned by Old Account — Instantly")
-st.success("Perfect when someone left but their folders are still shared with you")
+st.set_page_config(
+    page_title="Drive Liberator – Free Your Shared Folders",
+    page_icon="https://em-content.zobj.net/thumbs/120/google/350/rocket_1f680.png",
+    layout="centered"
+)
 
-st.markdown("<style>#MainMenu,footer,header,.stDeployButton{display:none}</style>", unsafe_allow_html=True)
+st.title("Drive Liberator")
+st.markdown("""
+### Free Your Shared Google Drive Folders Forever  
+**If a folder was shared with you but owned by someone else** → this tool creates **your own perfect copy** (side-by-side) so you never lose access — even if the original owner leaves.
+""")
+
+st.info("""
+**How it works:**  
+1. Upload your Google Cloud `client_secrets.json`  
+2. Paste the shared folder link or ID  
+3. Log in with your Google account  
+4. Click Start → Get full ownership of your data
+""")
+
+hide = """
+<style>
+    #MainMenu, footer, header {visibility: hidden;}
+    .css-1d391kg {display: none;}
+    .stDeployButton {display: none;}
+</style>
+"""
+st.markdown(hide, unsafe_allow_html=True)
 
 # ================================
-# INPUTS
+# CONFIG (User Inputs)
 # ================================
-with st.expander("1. Upload client_secrets.json (Web App)", expanded=True):
-    client_file = st.file_uploader("Upload file", type="json")
+with st.expander("Step 1: Upload Google Cloud Credentials", expanded=True):
+    st.markdown("**Required:** Create a [Google Cloud OAuth Client ID (Web Application)](https://console.cloud.google.com/apis/credentials)")
+    client_file = st.file_uploader(
+        "Upload `client_secrets.json` (Web App type)",
+        type="json",
+        help="Download from Google Cloud Console → Credentials → OAuth Client ID → Web Application"
+    )
 
-with st.expander("2. Old Account Email (SOURCE)", expanded=True):
-    source_email = st.text_input("Email of the old/source", placeholder="olduser@company.com")
+with st.expander("Step 2: Paste Shared Folder Link or ID", expanded=True):
+    folder_input = st.text_input(
+        "Paste Google Drive folder link or ID",
+        placeholder="e.g., https://drive.google.com/drive/folders/1I2CxnFpWl4G76lOXs05_9tN84NIZpxod"
+    )
 
-with st.expander("3. Shared Folder Link or ID", expanded=True):
-    folder_input = st.text_input("Folder link or ID", placeholder="https://drive.google.com/drive/folders/...")
     folder_id = None
     if folder_input:
-        m = re.search(r"/folders/([a-zA-Z0-9-_]+)", folder_input)
-        if m:
-            folder_id = m.group(1)
-            st.success(f"Folder ID: `{folder_id}`")
-        elif len(folder_input.strip()) >= 20:
+        match = re.search(r"/folders/([a-zA-Z0-9-_]+)", folder_input)
+        if match:
+            folder_id = match.group(1)
+            st.success(f"Folder ID detected: `{folder_id}`")
+        elif len(folder_input) in (33, 28):
             folder_id = folder_input.strip()
-            st.success(f"Using ID: `{folder_id}`")
+            st.success(f"Valid Folder ID: `{folder_id}`")
+        else:
+            st.error("Invalid link or ID. Please paste a correct folder link or ID.")
 
 # ================================
-# SESSION STORAGE
+# SESSION & TEMP
 # ================================
-def get_user_dir():
-    uid = st.session_state.get("uid", hashlib.sha256(str(time.time()).encode()).hexdigest()[:10])
-    st.session_state.uid = uid
-    base = Path("/tmp" if "streamlit" in str(Path.cwd()) else "temp")
-    user_dir = base / f"user_{uid}"
-    user_dir.mkdir(parents=True, exist_ok=True)
-    return user_dir
+def uid():
+    if "uid" not in st.session_state:
+        st.session_state.uid = hashlib.sha256(str(time.time()).encode()).hexdigest()[:10]
+    return st.session_state.uid
 
-USER_DIR = get_user_dir()
-atexit.register(lambda: __import__('shutil').rmtree(USER_DIR, ignore_errors=True))
+USER_ID = uid()
+TEMP_DIR = Path("/tmp" if "streamlit" in __file__ else "temp")  # Works on Streamlit Cloud
+TEMP_DIR.mkdir(exist_ok=True)
+
+def cleanup():
+    import shutil
+    try:
+        shutil.rmtree(TEMP_DIR / f"user_{USER_ID}")
+    except:
+        pass
+atexit.register(cleanup)
+
+USER_DIR = TEMP_DIR / f"user_{USER_ID}"
+USER_DIR.mkdir(exist_ok=True)
 
 # ================================
-# AUTH – FIXED fetch_token()
+# AUTHENTICATION
 # ================================
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 def get_service():
-    token_file = USER_DIR / "token.pkl"
-    client_path = USER_DIR / "client.json"
+    token_path = USER_DIR / "token.pkl"
+    creds = None
 
+    if token_path.exists():
+        with open(token_path, "rb") as f:
+            creds = pickle.load(f)
+
+    client_path = USER_DIR / "client_secrets.json"
     if client_file:
         client_path.write_bytes(client_file.getvalue())
 
     if not client_path.exists():
+        st.warning("Upload client_secrets.json to continue")
         st.stop()
-
-    creds = None
-    if token_file.exists():
-        with open(token_file, "rb") as f:
-            creds = pickle.load(f)
 
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-            with open(token_file, "wb") as f:
+            with open(token_path, "wb") as f:
                 pickle.dump(creds, f)
         except:
             creds = None
 
     if not creds:
-        flow = InstalledAppFlow.from_client_secrets_file(
-            str(client_path),
-            scopes=SCOPES,
-            redirect_uri="http://127.0.0.1:8501/"
-        )
-        auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
-        st.markdown(f"[Click to Login with Google]({auth_url})")
-        st.info("After approving, copy the **code** from the URL")
+        redirect_uri = "http://127.0.0.1:8501/"
+        try:
+            import json
+            with open(client_path, "r", encoding="utf-8") as f:
+                cdata = json.load(f)
+            uris = cdata.get("web", {}).get("redirect_uris", []) or cdata.get("installed", {}).get("redirect_uris", [])
+            if uris:
+                redirect_uri = uris[0]
+            elif "STREAMLIT_URL" in st.secrets:
+                redirect_uri = st.secrets["STREAMLIT_URL"]
+        except Exception:
+            pass
 
-        code = st.text_input("Paste the code here:", type="password", key="oauth_code")
+        if "auth_flow" not in st.session_state:
+            st.session_state.auth_flow = InstalledAppFlow.from_client_secrets_file(
+                str(client_path), SCOPES,
+                redirect_uri=redirect_uri
+            )
+            st.session_state.auth_url, _ = st.session_state.auth_flow.authorization_url(
+                prompt="consent",
+                access_type="offline"
+            )
+
+        flow = st.session_state.auth_flow
+        auth_url = st.session_state.auth_url
+
+        st.markdown("### Step 3: Google Login Required")
+        st.markdown(f"[Click here to authorize your Google Account]({auth_url})")
+        st.info("After approving, copy the **code** parameter from the redirect URL")
+        code = st.text_input("Paste the authorization code here:", type="password", key="oauth_auth_code")
 
         if code:
-            with st.spinner("Logging in..."):
-                try:
-                    # FIXED: Correct syntax for fetch_token()
-                    flow.fetch_token(code=code.strip())
-                    creds = flow.credentials
-                    with open(token_file, "wb") as f:
-                        pickle.dump(creds, f)
-                    st.success("Login successful!")
+            try:
+                code_clean = code.strip()
+                if "code=" in code_clean:
+                    code_clean = code_clean.split("code=")[1].split("&")[0]
+                import urllib.parse
+                code_clean = urllib.parse.unquote(code_clean)
+
+                flow.fetch_token(code=code_clean)
+                creds = flow.credentials
+                with open(token_path, "wb") as f:
+                    pickle.dump(creds, f)
+                st.session_state.pop("auth_flow", None)
+                st.session_state.pop("auth_url", None)
+                st.success("Login successful!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Login failed: {e}")
+                if st.button("Reset Login Session"):
+                    st.session_state.pop("auth_flow", None)
+                    st.session_state.pop("auth_url", None)
                     st.rerun()
-                except Exception as e:
-                    st.error(f"Invalid code: {e}")
+                st.stop()
+        else:
+            st.stop()
 
     service = build("drive", "v3", credentials=creds)
     user = service.about().get(fields="user").execute()["user"]
@@ -112,155 +186,141 @@ def get_service():
     return service
 
 # ================================
-# MAIN LIBERATION
+# MAIN LOGIC (Same GOD MODE + Better Logs)
 # ================================
-if client_file and source_email and folder_id and "@" in source_email:
+service = None
+if client_file:
     service = get_service()
 
-    col1, col2 = st.columns([3,1])
-    with col1:
-        start = st.button("START LIBERATION", type="primary", use_container_width=True)
-    with col2:
-        stop = st.button("STOP", type="secondary", use_container_width=True)
+if service and folder_id:
+    if st.button("Start Liberation", type="primary", use_container_width=True):
 
-    if stop:
-        st.session_state.stop = True
-        st.warning("Stopped by user")
-        st.stop()
+        log_container = st.container()
+        progress_bar = st.progress(0)
+        status_text = st.empty()
 
-    if start:
-        st.session_state.stop = False
         st.session_state.log = []
-        st.session_state.processed = 0
-        folder_cache = {}
+        st.session_state.skipped = []
+        duplicate_cache = {}
 
-        log_box = st.container()
-        progress = st.progress(0)
-        status = st.empty()
-
-        def log(msg, icon="Checkmark"):
-            if st.session_state.stop: return
+        def log(msg, icon="→"):
             st.session_state.log.append(f"{icon} {msg}")
-            with log_box:
+            with log_container:
                 st.markdown(f"{icon} {msg}")
 
-        def safe_progress(p):
-            if st.session_state.stop: return
-            try:
-                progress.progress(max(0.0, min(1.0, p)))
-            except:
-                pass
-
-        def api(fn, *a, **k):
-            for _ in range(8):
-                if st.session_state.stop: return None
+        def api_call(fn, *args, **kwargs):
+            for i in range(8):
                 try:
                     time.sleep(0.1)
-                    return fn(*a, **k).execute()
+                    return fn(*args, **kwargs).execute()
                 except HttpError as e:
-                    if e.resp.status in (429, 500, 502, 503, 504):
-                        time.sleep(2 ** _)
+                    if e.resp.status in (429, 500, 502, 503):
+                        wait = 2 ** i
+                        log(f"Rate limit... waiting {wait}s")
+                        time.sleep(wait)
                     else:
                         raise
-            return None
+            raise Exception("Max retries")
 
-        def create_folder(parent, name, path):
-            key = (parent, name)
-            if key in folder_cache:
-                return folder_cache[key]
-            res = api(service.files().create, body={
+        def create_folder(parent_id, name, path):
+            key = (parent_id, name)
+            if key in duplicate_cache:
+                return duplicate_cache[key]
+            new = api_call(service.files().create, body={
                 "name": name,
                 "mimeType": "application/vnd.google-apps.folder",
-                "parents": [parent]
+                "parents": [parent_id]
             }, fields="id", supportsAllDrives=True)
-            if res:
-                folder_cache[key] = res["id"]
-                log(f"Created: **{path}/{name}**", "Folder")
-                st.session_state.processed += 1
-                return res["id"]
-            return None
+            nid = new["id"]
+            duplicate_cache[key] = nid
+            log(f"Created folder: **{path}/{name}**", "Folder")
+            return nid
 
-        def copy_file(fid, name, parent, path):
+        def copy_file(fid, name, parent_id, path):
             try:
-                api(service.files().copy, fileId=fid, body={"parents": [parent]}, supportsAllDrives=True)
-                log(f"Copied: **{path}/{name}**", "File")
-                st.session_state.processed += 1
+                api_call(service.files().copy, fileId=fid, body={"parents": [parent_id]}, supportsAllDrives=True)
+                log(f"Copied file: **{path}/{name}**", "File")
             except HttpError as e:
                 if "cannotCopyFile" in str(e):
-                    log(f"Skipped (Form): **{path}/{name}**", "Warning")
+                    log(f"Skipped (Google Form): **{path}/{name}**", "Skip")
+                    st.session_state.skipped.append(f"{path}/{name}")
                 else:
-                    log(f"Failed: **{path}/{name}**", "Error")
+                    log(f"Failed: **{path}/{name}** → {e}", "Failed")
 
-        def copy_all(src_id, path, new_parent):
-            if st.session_state.stop: return
+        def duplicate_all_contents(folder_id, path, new_parent_id):
             page_token = None
             while True:
-                if st.session_state.stop: break
-                res = api(service.files().list,
-                    q=f"'{src_id}' in parents and trashed=false",
-                    fields="nextPageToken, files(id,name,mimeType)", pageSize=500,
-                    pageToken=page_token, supportsAllDrives=True)
-                if not res: break
+                res = api_call(service.files().list, q=f"'{folder_id}' in parents and trashed = false",
+                              fields="nextPageToken, files(id, name, mimeType)", pageSize=1000,
+                              pageToken=page_token, supportsAllDrives=True)
                 for f in res.get("files", []):
-                    if st.session_state.stop: break
-                    if f["mimeType"].endswith("folder"):
-                        nid = create_folder(new_parent, f["name"], path)
-                        if nid: copy_all(f["id"], f"{path}/{f['name']}", nid)
+                    if f["mimeType"] == "application/vnd.google-apps.folder":
+                        new_id = create_folder(new_parent_id, f["name"], path)
+                        duplicate_all_contents(f["id"], f"{path}/{f['name']}", new_id)
                     else:
-                        copy_file(f["id"], f["name"], new_parent, path)
+                        copy_file(f["id"], f["name"], new_parent_id, path)
                 page_token = res.get("nextPageToken")
                 if not page_token: break
 
-        def liberate(fid, path="Root"):
-            if st.session_state.stop: return
+        def deep_scan(folder_id, path=""):
             page_token = None
             while True:
-                if st.session_state.stop: break
-                res = api(service.files().list,
-                    q=f"'{fid}' in parents and trashed=false",
-                    fields="nextPageToken, files(id,name,mimeType,owners,parents)",
-                    pageSize=500, pageToken=page_token, supportsAllDrives=True)
-                if not res: break
-                for f in res.get("files", []):
-                    if st.session_state.stop: break
+                res = api_call(service.files().list, q=f"'{folder_id}' in parents and trashed = false",
+                              fields="nextPageToken, files(id, name, mimeType, owners, parents)",
+                              pageSize=1000, pageToken=page_token, supportsAllDrives=True)
+                items = res.get("files", [])
+                for i, f in enumerate(items):
+                    progress_bar.progress((i + 1) / len(items) if items else 1)
                     name = f["name"]
-                    full_path = f"{path}/{name}" if path != "Root" else name
-                    owners = f.get("owners", [])
-                    is_source = any(o.get("emailAddress", "").lower() == source_email.strip().lower() for o in owners)
-                    parent_id = f.get("parents", [None])[0]
+                    full_path = f"{path}/{name}" if path else name
+                    owners = f.get("owners", [{}])
+                    is_source = any(o.get("emailAddress") == owners[0].get("emailAddress") for o in owners if o)
+                    parents = f.get("parents", [])
 
                     if not is_source:
-                        if f["mimeType"].endswith("folder"):
-                            liberate(f["id"], full_path)
+                        if f["mimeType"].endswith(".folder"):
+                            deep_scan(f["id"], full_path)
                         continue
 
-                    if f["mimeType"].endswith("folder"):
-                        log(f"SOURCE FOLDER → copying: **{full_path}**", "Star")
-                        nid = create_folder(parent_id, name, path if path != "Root" else "")
-                        if nid: copy_all(f["id"], full_path, nid)
+                    parent_id = parents[0] if parents else None
+                    if not parent_id: continue
+
+                    if f["mimeType"].endswith(".folder"):
+                        log(f"Found YOUR FOLDER → copying everything inside: **{full_path}**", "Folder")
+                        new_folder_id = create_folder(parent_id, name, path)
+                        duplicate_all_contents(f["id"], full_path, new_folder_id)
                     else:
-                        copy_file(f["id"], name, parent_id, path if path != "Root" else "")
+                        copy_file(f["id"], name, parent_id, path)
+
+                    if f["mimeType"].endswith(".folder"):
+                        deep_scan(f["id"], full_path)
 
                 page_token = res.get("nextPageToken")
                 if not page_token: break
 
-        status.info(f"Searching for content owned by **{source_email}**...")
-        log(f"Started liberation from folder `{folder_id}`")
-        liberate(folder_id)
+        # START
+        log(f"Starting liberation of folder ID: `{folder_id}`")
+        status_text.info("Scanning and duplicating your content...")
+        deep_scan(folder_id)
 
-        if not st.session_state.get("stop", False):
-            st.success("LIBERATION COMPLETE!")
-            st.balloons()
-            st.success(f"Copied **{st.session_state.processed}** items from **{source_email}**")
-        else:
-            st.warning("Stopped by user")
+        total = len([l for l in st.session_state.log if "Copied" in l or "Created" in l])
+        st.success("LIBERATION COMPLETE!")
+        st.balloons()
+        st.success(f"Total items liberated: **{total}**")
+        if st.session_state.skipped:
+            st.warning(f"Skipped {len(st.session_state.skipped)} uncopyable items (e.g. Google Forms)")
+            with st.expander("View skipped"):
+                for s in st.session_state.skipped:
+                    st.write(s)
 
         st.markdown("### Full Log")
-        with log_box:
-            for l in st.session_state.log:
-                st.markdown(l)
+        with log_container:
+            for line in st.session_state.log:
+                st.markdown(line)
 
 else:
-    st.info("Complete all 3 steps to begin")
+    st.info("Please complete Step 1 and Step 2 to begin")
 
-
+# Footer
+st.markdown("---")
+st.caption("Made with ❤️ for everyone who lost access to shared folders • Open Source • No data stored")
