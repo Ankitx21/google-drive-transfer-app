@@ -1,5 +1,5 @@
 import streamlit as st
-import time, random, hashlib, atexit, re, json
+import time, random, hashlib, atexit, re, json, socket, ssl
 from pathlib import Path
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
@@ -22,7 +22,7 @@ st.markdown("""
 - **100% Read-Only on Source:** Original files and folders are never deleted, moved, or altered.
 - **Mirrored Structure:** Files are placed into their corresponding folders in the destination.
 - **Smart Resume & Skip:** If a file already exists in the target folder, it is safely skipped to prevent duplicates.
-- **Cloud-Direct:** Videos, documents, spreadsheets, and large files are copied server-side directly within Google's cloud.
+- **Auto-Token Refresh & Reconnect:** Automatically refreshes credentials and recovers from network drops.
 """)
 
 hide = """
@@ -47,6 +47,7 @@ TEMP_DIR = Path("temp")
 TEMP_DIR.mkdir(exist_ok=True)
 USER_DIR = TEMP_DIR / f"user_{USER_ID}"
 USER_DIR.mkdir(exist_ok=True)
+LOG_FILE = Path("transfer_log.txt")
 
 def cleanup():
     import shutil
@@ -76,11 +77,10 @@ with st.expander("Step 1: Google Cloud Credentials (`client_secrets.json`)", exp
         type="json",
         help="Download from Google Cloud Console -> Credentials -> OAuth 2.0 Client ID"
     )
-    # Check if client_secrets.json exists locally as default
     local_secrets = Path("client_secrets.json")
     if not client_file and local_secrets.exists():
         client_path = local_secrets
-        st.info("Found local `client_secrets.json` in workspace. You can use this or upload another.")
+        st.info("Using local `client_secrets.json` from workspace.")
     elif client_file:
         client_path = USER_DIR / "client_secrets.json"
         client_path.write_bytes(client_file.getvalue())
@@ -115,11 +115,10 @@ with st.expander("Step 3: Target Folder / Shared Drive Destination", expanded=Tr
 # AUTHENTICATION
 # ================================
 SCOPES = ["https://www.googleapis.com/auth/drive"]
+token_path = USER_DIR / "token.pkl"
 
 def get_service():
-    token_path = USER_DIR / "token.pkl"
     creds = None
-
     if token_path.exists():
         try:
             with open(token_path, "rb") as f:
@@ -199,86 +198,131 @@ def get_service():
     service = build("drive", "v3", credentials=creds)
     user = service.about().get(fields="user").execute()["user"]
     st.success(f"Authenticated as **{user['displayName']}** ({user['emailAddress']})")
-    return service
+    return service, creds
 
 service = None
+creds = None
 if client_path:
-    service = get_service()
+    service, creds = get_service()
 
 # ================================
 # TRANSFER / SYNC LOGIC
 # ================================
 if service and src_folder_id and dst_folder_id:
     st.markdown("---")
-    st.markdown("### Ready to Transfer")
+    st.markdown("### Safe Mirror Transfer Engine")
     st.caption("Copies files into corresponding folders in the destination. Original files are completely untouched.")
+
+    is_running = st.session_state.get("is_running", False)
 
     col1, col2 = st.columns([3, 1])
     with col1:
-        start_btn = st.button("Start Safe Mirror Transfer", type="primary", use_container_width=True)
+        start_btn = st.button("Start Safe Mirror Transfer", type="primary", use_container_width=True, disabled=is_running)
     with col2:
-        if st.button("Stop Transfer", use_container_width=True):
+        if st.button("Stop Transfer", use_container_width=True, disabled=not is_running):
             st.session_state.stop_transfer = True
+            st.session_state.is_running = False
             st.warning("Transfer stopped by user.")
 
     if start_btn:
+        st.session_state.is_running = True
         st.session_state.stop_transfer = False
-        st.session_state.log = []
         st.session_state.copied_count = 0
         st.session_state.skipped_count = 0
         st.session_state.error_count = 0
+        st.session_state.recent_logs = []
+        with open(LOG_FILE, "w", encoding="utf-8") as f:
+            f.write(f"--- Transfer Started: {time.ctime()} ---\n")
+        st.rerun()
 
-        log_container = st.container()
+    if is_running:
         status_text = st.empty()
         stats_placeholder = st.empty()
+        recent_log_placeholder = st.empty()
 
-        def log(msg, icon="→"):
-            st.session_state.log.append(f"{icon} {msg}")
-            with log_container:
-                st.markdown(f"{icon} {msg}")
+        def ensure_valid_token():
+            global creds, service
+            if creds and (creds.expired or not creds.valid) and creds.refresh_token:
+                try:
+                    creds.refresh(Request())
+                    with open(token_path, "wb") as f:
+                        pickle.dump(creds, f)
+                    service = build("drive", "v3", credentials=creds)
+                except Exception:
+                    pass
+
+        def log_entry(msg, to_ui=True):
+            ts = time.strftime("%H:%M:%S")
+            line = f"[{ts}] {msg}"
+            try:
+                with open(LOG_FILE, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+            except Exception:
+                pass
+
+            if to_ui:
+                if "recent_logs" not in st.session_state:
+                    st.session_state.recent_logs = []
+                st.session_state.recent_logs.append(line)
+                if len(st.session_state.recent_logs) > 15:
+                    st.session_state.recent_logs = st.session_state.recent_logs[-15:]
+                recent_log_placeholder.code("\n".join(st.session_state.recent_logs))
 
         def api_call(fn, *args, **kwargs):
-            for i in range(8):
+            global creds, service
+            for attempt in range(10):
                 if st.session_state.get("stop_transfer", False):
                     return None
                 try:
-                    time.sleep(0.08)
+                    ensure_valid_token()
+                    time.sleep(0.04)
                     return fn(*args, **kwargs).execute()
                 except HttpError as e:
-                    if e.resp.status in (403, 429, 500, 502, 503, 504):
-                        wait = (2 ** i) + random.uniform(0.1, 0.5)
-                        log(f"Rate quota limit (HTTP {e.resp.status}). Pausing for {wait:.1f}s...", "Wait")
+                    if e.resp.status == 401:
+                        log_entry("Token expired. Automatically refreshing credentials...")
+                        ensure_valid_token()
+                        time.sleep(1)
+                        continue
+                    elif e.resp.status in (403, 429, 500, 502, 503, 504):
+                        wait = (2 ** min(attempt, 5)) + random.uniform(0.5, 1.5)
+                        log_entry(f"Rate quota reached (HTTP {e.resp.status}). Pausing {wait:.1f}s...")
                         time.sleep(wait)
                     else:
                         raise
+                except (socket.timeout, TimeoutError, ssl.SSLError, ConnectionError, OSError) as e:
+                    wait = 2 + (2 ** min(attempt, 4))
+                    log_entry(f"Connection hiccup ({type(e).__name__}). Retrying in {wait}s...")
+                    time.sleep(wait)
             raise Exception("Maximum API retries exceeded.")
 
         def get_children(folder_id):
-            """Fetches all items inside a folder."""
             items = []
             page_token = None
             while True:
                 if st.session_state.get("stop_transfer", False):
                     break
-                res = api_call(
-                    service.files().list,
-                    q=f"'{folder_id}' in parents and trashed = false",
-                    fields="nextPageToken, files(id, name, mimeType, size)",
-                    pageSize=1000,
-                    pageToken=page_token,
-                    supportsAllDrives=True,
-                    includeItemsFromAllDrives=True
-                )
-                if not res:
-                    break
-                items.extend(res.get("files", []))
-                page_token = res.get("nextPageToken")
-                if not page_token:
+                try:
+                    res = api_call(
+                        service.files().list,
+                        q=f"'{folder_id}' in parents and trashed = false",
+                        fields="nextPageToken, files(id, name, mimeType, size)",
+                        pageSize=1000,
+                        pageToken=page_token,
+                        supportsAllDrives=True,
+                        includeItemsFromAllDrives=True
+                    )
+                    if not res:
+                        break
+                    items.extend(res.get("files", []))
+                    page_token = res.get("nextPageToken")
+                    if not page_token:
+                        break
+                except Exception as e:
+                    log_entry(f"Notice: could not list items in folder {folder_id}: {e}")
                     break
             return items
 
         def get_existing_target_maps(dst_parent_id):
-            """Returns (folders_dict, files_dict) already existing in the destination folder."""
             children = get_children(dst_parent_id)
             folders_map = {}
             files_map = {}
@@ -289,6 +333,13 @@ if service and src_folder_id and dst_folder_id:
                     files_map[item["name"]] = item["id"]
             return folders_map, files_map
 
+        def update_stats():
+            stats_placeholder.markdown(
+                f"**Copied:** {st.session_state.copied_count} | "
+                f"**Skipped (Already in Target):** {st.session_state.skipped_count} | "
+                f"**Errors:** {st.session_state.error_count}"
+            )
+
         def mirror_sync(src_id, dst_id, path=""):
             if st.session_state.get("stop_transfer", False):
                 return
@@ -297,11 +348,10 @@ if service and src_folder_id and dst_folder_id:
             target_folders, target_files = get_existing_target_maps(dst_id)
             source_items = get_children(src_id)
 
-            # Separate into subfolders and files
             subfolders = [f for f in source_items if f["mimeType"] == "application/vnd.google-apps.folder"]
             files = [f for f in source_items if f["mimeType"] != "application/vnd.google-apps.folder"]
 
-            # Process files first
+            # Process files in current folder
             for f in files:
                 if st.session_state.get("stop_transfer", False):
                     return
@@ -312,7 +362,8 @@ if service and src_folder_id and dst_folder_id:
 
                 if fname in target_files:
                     st.session_state.skipped_count += 1
-                    log(f"Already exists: **{full_item_path}**", "Skip")
+                    # Log to file, avoid UI DOM flooding on massive skip sequences
+                    log_entry(f"Skip (Already exists): {full_item_path}", to_ui=(st.session_state.skipped_count % 30 == 0))
                 else:
                     try:
                         api_call(
@@ -322,23 +373,19 @@ if service and src_folder_id and dst_folder_id:
                             supportsAllDrives=True
                         )
                         st.session_state.copied_count += 1
-                        log(f"Copied file: **{full_item_path}**", "File")
+                        log_entry(f"Copied file: {full_item_path}")
                     except HttpError as e:
                         if "cannotCopyFile" in str(e):
                             st.session_state.skipped_count += 1
-                            log(f"Uncopyable type (e.g. Google Form): **{full_item_path}**", "Skip")
+                            log_entry(f"Skip uncopyable: {full_item_path}")
                         else:
                             st.session_state.error_count += 1
-                            log(f"Failed copying {full_item_path}: {e}", "Error")
+                            log_entry(f"Failed copying {full_item_path}: {e}")
                     except Exception as e:
                         st.session_state.error_count += 1
-                        log(f"Error on {full_item_path}: {e}", "Error")
+                        log_entry(f"Error copying {full_item_path}: {e}")
 
-                stats_placeholder.markdown(
-                    f"**Copied:** {st.session_state.copied_count} | "
-                    f"**Skipped (Already in Target):** {st.session_state.skipped_count} | "
-                    f"**Errors:** {st.session_state.error_count}"
-                )
+                update_stats()
 
             # Process subfolders recursively
             for folder in subfolders:
@@ -351,9 +398,8 @@ if service and src_folder_id and dst_folder_id:
 
                 if folder_name in target_folders:
                     target_subfolder_id = target_folders[folder_name]
-                    log(f"Matched existing folder: **{sub_path}**", "Folder")
+                    log_entry(f"Matched folder: {sub_path}")
                 else:
-                    # Create folder in destination if not existing
                     new_folder = api_call(
                         service.files().create,
                         body={
@@ -365,13 +411,18 @@ if service and src_folder_id and dst_folder_id:
                         supportsAllDrives=True
                     )
                     target_subfolder_id = new_folder["id"]
-                    log(f"Created new folder in target: **{sub_path}**", "New")
+                    log_entry(f"Created folder in target: {sub_path}")
 
                 mirror_sync(folder_src_id, target_subfolder_id, sub_path)
 
-        # START PROCESS
-        log("Initiating safe mirror copy...")
-        mirror_sync(src_folder_id, dst_folder_id)
+        # Run Sync
+        log_entry("Initiating mirror sync...")
+        try:
+            mirror_sync(src_folder_id, dst_folder_id)
+        except Exception as e:
+            log_entry(f"Fatal error during sync: {e}")
+        finally:
+            st.session_state.is_running = False
 
         if not st.session_state.get("stop_transfer", False):
             st.success("TRANSFER COMPLETED SUCCESSFULLY!")
@@ -381,12 +432,10 @@ if service and src_folder_id and dst_folder_id:
 
         st.markdown(
             f"### Final Summary: Copied **{st.session_state.copied_count}** files, "
-            f"Skipped **{st.session_state.skipped_count}** existing/uncopyable items, "
+            f"Skipped **{st.session_state.skipped_count}** existing items, "
             f"Errors: **{st.session_state.error_count}**."
         )
 
-        with st.expander("View Full Execution Log", expanded=False):
-            for entry in st.session_state.log:
-                st.markdown(entry)
+        st.info("Full transfer log written to `transfer_log.txt` in workspace.")
 else:
     st.info("Complete configuration steps above and ensure both Source and Destination IDs are detected.")
