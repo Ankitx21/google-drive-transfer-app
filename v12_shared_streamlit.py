@@ -1,35 +1,28 @@
-# app.py
 import streamlit as st
-import time, random, hashlib, atexit
+import time, random, hashlib, atexit, re, json
 from pathlib import Path
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.auth.transport.requests import Request
 import pickle
-import re
 
 # ================================
 # PAGE CONFIG & STYLE
 # ================================
 st.set_page_config(
-    page_title="Drive Liberator – Free Your Shared Folders",
+    page_title="Safe Drive Transfer – Mirror to Shared Drive",
     page_icon="https://em-content.zobj.net/thumbs/120/google/350/rocket_1f680.png",
     layout="centered"
 )
 
-st.title("Drive Liberator")
+st.title("Google Drive Safe Mirror Transfer")
 st.markdown("""
-### Free Your Shared Google Drive Folders Forever  
-**If a folder was shared with you but owned by someone else** → this tool creates **your own perfect copy** (side-by-side) so you never lose access — even if the original owner leaves.
-""")
-
-st.info("""
-**How it works:**  
-1. Upload your Google Cloud `client_secrets.json`  
-2. Paste the shared folder link or ID  
-3. Log in with your Google account  
-4. Click Start → Get full ownership of your data
+### Safely Copy Files to a Target Shared Drive
+- **100% Read-Only on Source:** Original files and folders are never deleted, moved, or altered.
+- **Mirrored Structure:** Files are placed into their corresponding folders in the destination.
+- **Smart Resume & Skip:** If a file already exists in the target folder, it is safely skipped to prevent duplicates.
+- **Cloud-Direct:** Videos, documents, spreadsheets, and large files are copied server-side directly within Google's cloud.
 """)
 
 hide = """
@@ -42,36 +35,7 @@ hide = """
 st.markdown(hide, unsafe_allow_html=True)
 
 # ================================
-# CONFIG (User Inputs)
-# ================================
-with st.expander("Step 1: Upload Google Cloud Credentials", expanded=True):
-    st.markdown("**Required:** Create a [Google Cloud OAuth Client ID (Web Application)](https://console.cloud.google.com/apis/credentials)")
-    client_file = st.file_uploader(
-        "Upload `client_secrets.json` (Web App type)",
-        type="json",
-        help="Download from Google Cloud Console → Credentials → OAuth Client ID → Web Application"
-    )
-
-with st.expander("Step 2: Paste Shared Folder Link or ID", expanded=True):
-    folder_input = st.text_input(
-        "Paste Google Drive folder link or ID",
-        placeholder="e.g., https://drive.google.com/drive/folders/1I2CxnFpWl4G76lOXs05_9tN84NIZpxod"
-    )
-
-    folder_id = None
-    if folder_input:
-        match = re.search(r"/folders/([a-zA-Z0-9-_]+)", folder_input)
-        if match:
-            folder_id = match.group(1)
-            st.success(f"Folder ID detected: `{folder_id}`")
-        elif len(folder_input) in (33, 28):
-            folder_id = folder_input.strip()
-            st.success(f"Valid Folder ID: `{folder_id}`")
-        else:
-            st.error("Invalid link or ID. Please paste a correct folder link or ID.")
-
-# ================================
-# SESSION & TEMP
+# SESSION & TEMP SETUP
 # ================================
 def uid():
     if "uid" not in st.session_state:
@@ -79,19 +43,73 @@ def uid():
     return st.session_state.uid
 
 USER_ID = uid()
-TEMP_DIR = Path("/tmp" if "streamlit" in __file__ else "temp")  # Works on Streamlit Cloud
+TEMP_DIR = Path("temp")
 TEMP_DIR.mkdir(exist_ok=True)
+USER_DIR = TEMP_DIR / f"user_{USER_ID}"
+USER_DIR.mkdir(exist_ok=True)
 
 def cleanup():
     import shutil
     try:
-        shutil.rmtree(TEMP_DIR / f"user_{USER_ID}")
-    except:
+        shutil.rmtree(USER_DIR)
+    except Exception:
         pass
 atexit.register(cleanup)
 
-USER_DIR = TEMP_DIR / f"user_{USER_ID}"
-USER_DIR.mkdir(exist_ok=True)
+def extract_folder_id(val):
+    if not val:
+        return None
+    val = val.strip()
+    match = re.search(r"/folders/([a-zA-Z0-9-_]+)", val)
+    if match:
+        return match.group(1)
+    if len(val) >= 15 and re.match(r"^[a-zA-Z0-9-_]+$", val):
+        return val
+    return None
+
+# ================================
+# CONFIG (User Inputs)
+# ================================
+with st.expander("Step 1: Google Cloud Credentials (`client_secrets.json`)", expanded=True):
+    client_file = st.file_uploader(
+        "Upload client_secrets.json (Web Application OAuth)",
+        type="json",
+        help="Download from Google Cloud Console -> Credentials -> OAuth 2.0 Client ID"
+    )
+    # Check if client_secrets.json exists locally as default
+    local_secrets = Path("client_secrets.json")
+    if not client_file and local_secrets.exists():
+        client_path = local_secrets
+        st.info("Found local `client_secrets.json` in workspace. You can use this or upload another.")
+    elif client_file:
+        client_path = USER_DIR / "client_secrets.json"
+        client_path.write_bytes(client_file.getvalue())
+    else:
+        client_path = None
+
+with st.expander("Step 2: Source Folder (Shared with me / Source Drive)", expanded=True):
+    src_input = st.text_input(
+        "Source Google Drive Folder Link or ID",
+        value="https://drive.google.com/drive/folders/1ZobgX-uCufQGNGPAQh-loI0PaDk0HkCK",
+        placeholder="https://drive.google.com/drive/folders/..."
+    )
+    src_folder_id = extract_folder_id(src_input)
+    if src_folder_id:
+        st.success(f"Source Folder ID: `{src_folder_id}`")
+    else:
+        st.warning("Please provide a valid Source Folder link or ID.")
+
+with st.expander("Step 3: Target Folder / Shared Drive Destination", expanded=True):
+    dst_input = st.text_input(
+        "Destination Google Drive Folder Link or Shared Drive ID",
+        value="https://drive.google.com/drive/folders/1gOWiMl9V7D7_TF3XacceSE89-IdKtUU5",
+        placeholder="https://drive.google.com/drive/folders/..."
+    )
+    dst_folder_id = extract_folder_id(dst_input)
+    if dst_folder_id:
+        st.success(f"Destination Folder ID: `{dst_folder_id}`")
+    else:
+        st.warning("Please provide a valid Destination Folder link or ID.")
 
 # ================================
 # AUTHENTICATION
@@ -103,15 +121,14 @@ def get_service():
     creds = None
 
     if token_path.exists():
-        with open(token_path, "rb") as f:
-            creds = pickle.load(f)
+        try:
+            with open(token_path, "rb") as f:
+                creds = pickle.load(f)
+        except Exception:
+            creds = None
 
-    client_path = USER_DIR / "client_secrets.json"
-    if client_file:
-        client_path.write_bytes(client_file.getvalue())
-
-    if not client_path.exists():
-        st.warning("Upload client_secrets.json to continue")
+    if not client_path or not client_path.exists():
+        st.warning("Please provide `client_secrets.json` to proceed.")
         st.stop()
 
     if creds and creds.expired and creds.refresh_token:
@@ -119,13 +136,12 @@ def get_service():
             creds.refresh(Request())
             with open(token_path, "wb") as f:
                 pickle.dump(creds, f)
-        except:
+        except Exception:
             creds = None
 
     if not creds:
         redirect_uri = "http://127.0.0.1:8501/"
         try:
-            import json
             with open(client_path, "r", encoding="utf-8") as f:
                 cdata = json.load(f)
             uris = cdata.get("web", {}).get("redirect_uris", []) or cdata.get("installed", {}).get("redirect_uris", [])
@@ -149,9 +165,9 @@ def get_service():
         flow = st.session_state.auth_flow
         auth_url = st.session_state.auth_url
 
-        st.markdown("### Step 3: Google Login Required")
-        st.markdown(f"[Click here to authorize your Google Account]({auth_url})")
-        st.info("After approving, copy the **code** parameter from the redirect URL")
+        st.markdown("### Step 4: Login with Google Account")
+        st.markdown(f"[**Click here to authorize your Google Account**]({auth_url})")
+        st.info("Log in as **ankit.varma@iihs.ac.in**. After approving, copy the `code=` parameter from the URL bar.")
         code = st.text_input("Paste the authorization code here:", type="password", key="oauth_auth_code")
 
         if code:
@@ -168,7 +184,7 @@ def get_service():
                     pickle.dump(creds, f)
                 st.session_state.pop("auth_flow", None)
                 st.session_state.pop("auth_url", None)
-                st.success("Login successful!")
+                st.success("Authentication successful!")
                 st.rerun()
             except Exception as e:
                 st.error(f"Login failed: {e}")
@@ -182,26 +198,39 @@ def get_service():
 
     service = build("drive", "v3", credentials=creds)
     user = service.about().get(fields="user").execute()["user"]
-    st.success(f"Logged in as **{user['displayName']}** ({user['emailAddress']})")
+    st.success(f"Authenticated as **{user['displayName']}** ({user['emailAddress']})")
     return service
 
-# ================================
-# MAIN LOGIC (Same GOD MODE + Better Logs)
-# ================================
 service = None
-if client_file:
+if client_path:
     service = get_service()
 
-if service and folder_id:
-    if st.button("Start Liberation", type="primary", use_container_width=True):
+# ================================
+# TRANSFER / SYNC LOGIC
+# ================================
+if service and src_folder_id and dst_folder_id:
+    st.markdown("---")
+    st.markdown("### Ready to Transfer")
+    st.caption("Copies files into corresponding folders in the destination. Original files are completely untouched.")
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        start_btn = st.button("Start Safe Mirror Transfer", type="primary", use_container_width=True)
+    with col2:
+        if st.button("Stop Transfer", use_container_width=True):
+            st.session_state.stop_transfer = True
+            st.warning("Transfer stopped by user.")
+
+    if start_btn:
+        st.session_state.stop_transfer = False
+        st.session_state.log = []
+        st.session_state.copied_count = 0
+        st.session_state.skipped_count = 0
+        st.session_state.error_count = 0
 
         log_container = st.container()
-        progress_bar = st.progress(0)
         status_text = st.empty()
-
-        st.session_state.log = []
-        st.session_state.skipped = []
-        duplicate_cache = {}
+        stats_placeholder = st.empty()
 
         def log(msg, icon="→"):
             st.session_state.log.append(f"{icon} {msg}")
@@ -210,117 +239,154 @@ if service and folder_id:
 
         def api_call(fn, *args, **kwargs):
             for i in range(8):
+                if st.session_state.get("stop_transfer", False):
+                    return None
                 try:
-                    time.sleep(0.1)
+                    time.sleep(0.08)
                     return fn(*args, **kwargs).execute()
                 except HttpError as e:
-                    if e.resp.status in (429, 500, 502, 503):
-                        wait = 2 ** i
-                        log(f"Rate limit... waiting {wait}s")
+                    if e.resp.status in (403, 429, 500, 502, 503, 504):
+                        wait = (2 ** i) + random.uniform(0.1, 0.5)
+                        log(f"Rate quota limit (HTTP {e.resp.status}). Pausing for {wait:.1f}s...", "Wait")
                         time.sleep(wait)
                     else:
                         raise
-            raise Exception("Max retries")
+            raise Exception("Maximum API retries exceeded.")
 
-        def create_folder(parent_id, name, path):
-            key = (parent_id, name)
-            if key in duplicate_cache:
-                return duplicate_cache[key]
-            new = api_call(service.files().create, body={
-                "name": name,
-                "mimeType": "application/vnd.google-apps.folder",
-                "parents": [parent_id]
-            }, fields="id", supportsAllDrives=True)
-            nid = new["id"]
-            duplicate_cache[key] = nid
-            log(f"Created folder: **{path}/{name}**", "Folder")
-            return nid
+        def get_children(folder_id):
+            """Fetches all items inside a folder."""
+            items = []
+            page_token = None
+            while True:
+                if st.session_state.get("stop_transfer", False):
+                    break
+                res = api_call(
+                    service.files().list,
+                    q=f"'{folder_id}' in parents and trashed = false",
+                    fields="nextPageToken, files(id, name, mimeType, size)",
+                    pageSize=1000,
+                    pageToken=page_token,
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True
+                )
+                if not res:
+                    break
+                items.extend(res.get("files", []))
+                page_token = res.get("nextPageToken")
+                if not page_token:
+                    break
+            return items
 
-        def copy_file(fid, name, parent_id, path):
-            try:
-                api_call(service.files().copy, fileId=fid, body={"parents": [parent_id]}, supportsAllDrives=True)
-                log(f"Copied file: **{path}/{name}**", "File")
-            except HttpError as e:
-                if "cannotCopyFile" in str(e):
-                    log(f"Skipped (Google Form): **{path}/{name}**", "Skip")
-                    st.session_state.skipped.append(f"{path}/{name}")
+        def get_existing_target_maps(dst_parent_id):
+            """Returns (folders_dict, files_dict) already existing in the destination folder."""
+            children = get_children(dst_parent_id)
+            folders_map = {}
+            files_map = {}
+            for item in children:
+                if item["mimeType"] == "application/vnd.google-apps.folder":
+                    folders_map[item["name"]] = item["id"]
                 else:
-                    log(f"Failed: **{path}/{name}** → {e}", "Failed")
+                    files_map[item["name"]] = item["id"]
+            return folders_map, files_map
 
-        def duplicate_all_contents(folder_id, path, new_parent_id):
-            page_token = None
-            while True:
-                res = api_call(service.files().list, q=f"'{folder_id}' in parents and trashed = false",
-                              fields="nextPageToken, files(id, name, mimeType)", pageSize=1000,
-                              pageToken=page_token, supportsAllDrives=True)
-                for f in res.get("files", []):
-                    if f["mimeType"] == "application/vnd.google-apps.folder":
-                        new_id = create_folder(new_parent_id, f["name"], path)
-                        duplicate_all_contents(f["id"], f"{path}/{f['name']}", new_id)
-                    else:
-                        copy_file(f["id"], f["name"], new_parent_id, path)
-                page_token = res.get("nextPageToken")
-                if not page_token: break
+        def mirror_sync(src_id, dst_id, path=""):
+            if st.session_state.get("stop_transfer", False):
+                return
 
-        def deep_scan(folder_id, path=""):
-            page_token = None
-            while True:
-                res = api_call(service.files().list, q=f"'{folder_id}' in parents and trashed = false",
-                              fields="nextPageToken, files(id, name, mimeType, owners, parents)",
-                              pageSize=1000, pageToken=page_token, supportsAllDrives=True)
-                items = res.get("files", [])
-                for i, f in enumerate(items):
-                    progress_bar.progress((i + 1) / len(items) if items else 1)
-                    name = f["name"]
-                    full_path = f"{path}/{name}" if path else name
-                    owners = f.get("owners", [{}])
-                    is_source = any(o.get("emailAddress") == owners[0].get("emailAddress") for o in owners if o)
-                    parents = f.get("parents", [])
+            status_text.info(f"Scanning folder: **{path or 'Root'}**")
+            target_folders, target_files = get_existing_target_maps(dst_id)
+            source_items = get_children(src_id)
 
-                    if not is_source:
-                        if f["mimeType"].endswith(".folder"):
-                            deep_scan(f["id"], full_path)
-                        continue
+            # Separate into subfolders and files
+            subfolders = [f for f in source_items if f["mimeType"] == "application/vnd.google-apps.folder"]
+            files = [f for f in source_items if f["mimeType"] != "application/vnd.google-apps.folder"]
 
-                    parent_id = parents[0] if parents else None
-                    if not parent_id: continue
+            # Process files first
+            for f in files:
+                if st.session_state.get("stop_transfer", False):
+                    return
 
-                    if f["mimeType"].endswith(".folder"):
-                        log(f"Found YOUR FOLDER → copying everything inside: **{full_path}**", "Folder")
-                        new_folder_id = create_folder(parent_id, name, path)
-                        duplicate_all_contents(f["id"], full_path, new_folder_id)
-                    else:
-                        copy_file(f["id"], name, parent_id, path)
+                fname = f["name"]
+                fid = f["id"]
+                full_item_path = f"{path}/{fname}" if path else fname
 
-                    if f["mimeType"].endswith(".folder"):
-                        deep_scan(f["id"], full_path)
+                if fname in target_files:
+                    st.session_state.skipped_count += 1
+                    log(f"Already exists: **{full_item_path}**", "Skip")
+                else:
+                    try:
+                        api_call(
+                            service.files().copy,
+                            fileId=fid,
+                            body={"name": fname, "parents": [dst_id]},
+                            supportsAllDrives=True
+                        )
+                        st.session_state.copied_count += 1
+                        log(f"Copied file: **{full_item_path}**", "File")
+                    except HttpError as e:
+                        if "cannotCopyFile" in str(e):
+                            st.session_state.skipped_count += 1
+                            log(f"Uncopyable type (e.g. Google Form): **{full_item_path}**", "Skip")
+                        else:
+                            st.session_state.error_count += 1
+                            log(f"Failed copying {full_item_path}: {e}", "Error")
+                    except Exception as e:
+                        st.session_state.error_count += 1
+                        log(f"Error on {full_item_path}: {e}", "Error")
 
-                page_token = res.get("nextPageToken")
-                if not page_token: break
+                stats_placeholder.markdown(
+                    f"**Copied:** {st.session_state.copied_count} | "
+                    f"**Skipped (Already in Target):** {st.session_state.skipped_count} | "
+                    f"**Errors:** {st.session_state.error_count}"
+                )
 
-        # START
-        log(f"Starting liberation of folder ID: `{folder_id}`")
-        status_text.info("Scanning and duplicating your content...")
-        deep_scan(folder_id)
+            # Process subfolders recursively
+            for folder in subfolders:
+                if st.session_state.get("stop_transfer", False):
+                    return
 
-        total = len([l for l in st.session_state.log if "Copied" in l or "Created" in l])
-        st.success("LIBERATION COMPLETE!")
-        st.balloons()
-        st.success(f"Total items liberated: **{total}**")
-        if st.session_state.skipped:
-            st.warning(f"Skipped {len(st.session_state.skipped)} uncopyable items (e.g. Google Forms)")
-            with st.expander("View skipped"):
-                for s in st.session_state.skipped:
-                    st.write(s)
+                folder_name = folder["name"]
+                folder_src_id = folder["id"]
+                sub_path = f"{path}/{folder_name}" if path else folder_name
 
-        st.markdown("### Full Log")
-        with log_container:
-            for line in st.session_state.log:
-                st.markdown(line)
+                if folder_name in target_folders:
+                    target_subfolder_id = target_folders[folder_name]
+                    log(f"Matched existing folder: **{sub_path}**", "Folder")
+                else:
+                    # Create folder in destination if not existing
+                    new_folder = api_call(
+                        service.files().create,
+                        body={
+                            "name": folder_name,
+                            "mimeType": "application/vnd.google-apps.folder",
+                            "parents": [dst_id]
+                        },
+                        fields="id",
+                        supportsAllDrives=True
+                    )
+                    target_subfolder_id = new_folder["id"]
+                    log(f"Created new folder in target: **{sub_path}**", "New")
 
+                mirror_sync(folder_src_id, target_subfolder_id, sub_path)
+
+        # START PROCESS
+        log("Initiating safe mirror copy...")
+        mirror_sync(src_folder_id, dst_folder_id)
+
+        if not st.session_state.get("stop_transfer", False):
+            st.success("TRANSFER COMPLETED SUCCESSFULLY!")
+            st.balloons()
+        else:
+            st.warning("Transfer stopped.")
+
+        st.markdown(
+            f"### Final Summary: Copied **{st.session_state.copied_count}** files, "
+            f"Skipped **{st.session_state.skipped_count}** existing/uncopyable items, "
+            f"Errors: **{st.session_state.error_count}**."
+        )
+
+        with st.expander("View Full Execution Log", expanded=False):
+            for entry in st.session_state.log:
+                st.markdown(entry)
 else:
-    st.info("Please complete Step 1 and Step 2 to begin")
-
-# Footer
-st.markdown("---")
-st.caption("Made with ❤️ for everyone who lost access to shared folders • Open Source • No data stored")
+    st.info("Complete configuration steps above and ensure both Source and Destination IDs are detected.")
