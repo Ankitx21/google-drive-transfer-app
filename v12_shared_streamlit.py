@@ -20,8 +20,8 @@ st.title("Google Drive Safe Mirror Transfer")
 st.markdown("""
 ### Safely Copy Files to a Target Shared Drive
 - **100% Read-Only on Source:** Original files and folders are never deleted, moved, or altered.
+- **Persistent Checkpoints:** Remembers all completed folders and files. Restarts instantly without re-checking from the start.
 - **Mirrored Structure:** Files are placed into their corresponding folders in the destination.
-- **Smart Resume & Skip:** If a file already exists in the target folder, it is safely skipped to prevent duplicates.
 - **Auto-Token Refresh & Reconnect:** Automatically refreshes credentials and recovers from network drops.
 """)
 
@@ -35,7 +35,7 @@ hide = """
 st.markdown(hide, unsafe_allow_html=True)
 
 # ================================
-# SESSION & TEMP SETUP
+# SESSION, PATHS & CHECKPOINT
 # ================================
 def uid():
     if "uid" not in st.session_state:
@@ -43,11 +43,14 @@ def uid():
     return st.session_state.uid
 
 USER_ID = uid()
-TEMP_DIR = Path("temp")
+SCRIPT_DIR = Path(__file__).resolve().parent
+TEMP_DIR = SCRIPT_DIR / "temp"
 TEMP_DIR.mkdir(exist_ok=True)
 USER_DIR = TEMP_DIR / f"user_{USER_ID}"
 USER_DIR.mkdir(exist_ok=True)
-LOG_FILE = Path("transfer_log.txt")
+
+LOG_FILE = SCRIPT_DIR / "transfer_log.txt"
+CHECKPOINT_FILE = SCRIPT_DIR / "checkpoint.json"
 
 def cleanup():
     import shutil
@@ -68,6 +71,33 @@ def extract_folder_id(val):
         return val
     return None
 
+def load_checkpoint():
+    if CHECKPOINT_FILE.exists():
+        try:
+            with open(CHECKPOINT_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return {
+                    "completed_folders": set(data.get("completed_folders", [])),
+                    "completed_files": set(data.get("completed_files", [])),
+                    "folder_mappings": data.get("folder_mappings", {})
+                }
+        except Exception:
+            pass
+    return {"completed_folders": set(), "completed_files": set(), "folder_mappings": {}}
+
+def save_checkpoint(ckpt):
+    try:
+        data = {
+            "completed_folders": list(ckpt["completed_folders"]),
+            "completed_files": list(ckpt["completed_files"]),
+            "folder_mappings": ckpt["folder_mappings"],
+            "last_updated": time.time()
+        }
+        with open(CHECKPOINT_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
 # ================================
 # CONFIG (User Inputs)
 # ================================
@@ -77,7 +107,7 @@ with st.expander("Step 1: Google Cloud Credentials (`client_secrets.json`)", exp
         type="json",
         help="Download from Google Cloud Console -> Credentials -> OAuth 2.0 Client ID"
     )
-    local_secrets = Path("client_secrets.json")
+    local_secrets = SCRIPT_DIR / "client_secrets.json"
     if not client_file and local_secrets.exists():
         client_path = local_secrets
         st.info("Using local `client_secrets.json` from workspace.")
@@ -110,6 +140,22 @@ with st.expander("Step 3: Target Folder / Shared Drive Destination", expanded=Tr
         st.success(f"Destination Folder ID: `{dst_folder_id}`")
     else:
         st.warning("Please provide a valid Destination Folder link or ID.")
+
+# Checkpoint Summary in UI
+checkpoint_data = load_checkpoint()
+col_chk1, col_chk2 = st.columns([3, 1])
+with col_chk1:
+    use_checkpoint = st.checkbox(
+        f"Enable Persistent Checkpoint ({len(checkpoint_data['completed_folders'])} folders, {len(checkpoint_data['completed_files'])} files already recorded)",
+        value=True,
+        help="Skips completed folders and files instantly in memory without re-querying Google Drive API."
+    )
+with col_chk2:
+    if st.button("Reset Checkpoint", help="Clear saved progress to force full re-check"):
+        if CHECKPOINT_FILE.exists():
+            CHECKPOINT_FILE.unlink(missing_ok=True)
+        st.success("Checkpoint cleared!")
+        st.rerun()
 
 # ================================
 # AUTHENTICATION
@@ -231,14 +277,16 @@ if service and src_folder_id and dst_folder_id:
         st.session_state.skipped_count = 0
         st.session_state.error_count = 0
         st.session_state.recent_logs = []
-        with open(LOG_FILE, "w", encoding="utf-8") as f:
-            f.write(f"--- Transfer Started: {time.ctime()} ---\n")
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"\n--- Transfer Run Started: {time.ctime()} ---\n")
         st.rerun()
 
     if is_running:
         status_text = st.empty()
         stats_placeholder = st.empty()
         recent_log_placeholder = st.empty()
+
+        ckpt = load_checkpoint()
 
         def ensure_valid_token():
             global creds, service
@@ -342,7 +390,12 @@ if service and src_folder_id and dst_folder_id:
 
         def mirror_sync(src_id, dst_id, path=""):
             if st.session_state.get("stop_transfer", False):
-                return
+                return False
+
+            # Checkpoint fast-skip: entire folder already 100% completed
+            if use_checkpoint and src_id in ckpt["completed_folders"]:
+                log_entry(f"Instant Skip (Folder completed in checkpoint): {path or 'Root'}", to_ui=False)
+                return True
 
             status_text.info(f"Scanning folder: **{path or 'Root'}**")
             target_folders, target_files = get_existing_target_maps(dst_id)
@@ -351,18 +404,27 @@ if service and src_folder_id and dst_folder_id:
             subfolders = [f for f in source_items if f["mimeType"] == "application/vnd.google-apps.folder"]
             files = [f for f in source_items if f["mimeType"] != "application/vnd.google-apps.folder"]
 
-            # Process files in current folder
+            folder_all_ok = True
+            unflushed_file_saves = 0
+
+            # 1. Process files in current folder
             for f in files:
                 if st.session_state.get("stop_transfer", False):
-                    return
+                    return False
 
                 fname = f["name"]
                 fid = f["id"]
                 full_item_path = f"{path}/{fname}" if path else fname
 
+                # Fast skip if file was recorded in checkpoint
+                if use_checkpoint and fid in ckpt["completed_files"]:
+                    st.session_state.skipped_count += 1
+                    continue
+
                 if fname in target_files:
                     st.session_state.skipped_count += 1
-                    # Log to file, avoid UI DOM flooding on massive skip sequences
+                    ckpt["completed_files"].add(fid)
+                    unflushed_file_saves += 1
                     log_entry(f"Skip (Already exists): {full_item_path}", to_ui=(st.session_state.skipped_count % 30 == 0))
                 else:
                     try:
@@ -373,31 +435,53 @@ if service and src_folder_id and dst_folder_id:
                             supportsAllDrives=True
                         )
                         st.session_state.copied_count += 1
+                        ckpt["completed_files"].add(fid)
+                        unflushed_file_saves += 1
                         log_entry(f"Copied file: {full_item_path}")
                     except HttpError as e:
                         if "cannotCopyFile" in str(e):
                             st.session_state.skipped_count += 1
+                            ckpt["completed_files"].add(fid)
+                            unflushed_file_saves += 1
                             log_entry(f"Skip uncopyable: {full_item_path}")
                         else:
                             st.session_state.error_count += 1
+                            folder_all_ok = False
                             log_entry(f"Failed copying {full_item_path}: {e}")
                     except Exception as e:
                         st.session_state.error_count += 1
+                        folder_all_ok = False
                         log_entry(f"Error copying {full_item_path}: {e}")
+
+                if unflushed_file_saves >= 15:
+                    save_checkpoint(ckpt)
+                    unflushed_file_saves = 0
 
                 update_stats()
 
-            # Process subfolders recursively
+            if unflushed_file_saves > 0:
+                save_checkpoint(ckpt)
+
+            # 2. Process subfolders recursively
             for folder in subfolders:
                 if st.session_state.get("stop_transfer", False):
-                    return
+                    return False
 
                 folder_name = folder["name"]
                 folder_src_id = folder["id"]
                 sub_path = f"{path}/{folder_name}" if path else folder_name
 
-                if folder_name in target_folders:
+                # Checkpoint fast-skip for subfolder
+                if use_checkpoint and folder_src_id in ckpt["completed_folders"]:
+                    log_entry(f"Instant Skip (Folder completed in checkpoint): {sub_path}", to_ui=False)
+                    continue
+
+                # Use cached mapping or match/create in destination
+                if folder_src_id in ckpt["folder_mappings"]:
+                    target_subfolder_id = ckpt["folder_mappings"][folder_src_id]
+                elif folder_name in target_folders:
                     target_subfolder_id = target_folders[folder_name]
+                    ckpt["folder_mappings"][folder_src_id] = target_subfolder_id
                     log_entry(f"Matched folder: {sub_path}")
                 else:
                     new_folder = api_call(
@@ -411,12 +495,24 @@ if service and src_folder_id and dst_folder_id:
                         supportsAllDrives=True
                     )
                     target_subfolder_id = new_folder["id"]
+                    ckpt["folder_mappings"][folder_src_id] = target_subfolder_id
                     log_entry(f"Created folder in target: {sub_path}")
 
-                mirror_sync(folder_src_id, target_subfolder_id, sub_path)
+                subfolder_ok = mirror_sync(folder_src_id, target_subfolder_id, sub_path)
+                if not subfolder_ok:
+                    folder_all_ok = False
+
+            # Mark folder completed only if all files and subfolders finished cleanly
+            if folder_all_ok and not st.session_state.get("stop_transfer", False):
+                ckpt["completed_folders"].add(src_id)
+                save_checkpoint(ckpt)
+                log_entry(f"Folder 100% completed & checkpointed: {path or 'Root'}")
+                return True
+
+            return False
 
         # Run Sync
-        log_entry("Initiating mirror sync...")
+        log_entry("Initiating mirror sync with checkpoint resume...")
         try:
             mirror_sync(src_folder_id, dst_folder_id)
         except Exception as e:
@@ -436,6 +532,6 @@ if service and src_folder_id and dst_folder_id:
             f"Errors: **{st.session_state.error_count}**."
         )
 
-        st.info("Full transfer log written to `transfer_log.txt` in workspace.")
+        st.info("Full transfer log written to `transfer_log.txt` and progress saved in `checkpoint.json`.")
 else:
     st.info("Complete configuration steps above and ensure both Source and Destination IDs are detected.")
