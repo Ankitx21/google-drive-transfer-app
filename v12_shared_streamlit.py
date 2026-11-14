@@ -120,7 +120,7 @@ with st.expander("Step 1: Google Cloud Credentials (`client_secrets.json`)", exp
 with st.expander("Step 2: Source Folder (Shared with me / Source Drive)", expanded=True):
     src_input = st.text_input(
         "Source Google Drive Folder Link or ID",
-        value="https://drive.google.com/drive/folders/1ZobgX-uCufQGNGPAQh-loI0PaDk0HkCK",
+        value="https://drive.google.com/drive/folders/1qJucxdfJdBFO1hj3-XKFjbZzMBlNVuYK",
         placeholder="https://drive.google.com/drive/folders/..."
     )
     src_folder_id = extract_folder_id(src_input)
@@ -132,7 +132,7 @@ with st.expander("Step 2: Source Folder (Shared with me / Source Drive)", expand
 with st.expander("Step 3: Target Folder / Shared Drive Destination", expanded=True):
     dst_input = st.text_input(
         "Destination Google Drive Folder Link or Shared Drive ID",
-        value="https://drive.google.com/drive/folders/1gOWiMl9V7D7_TF3XacceSE89-IdKtUU5",
+        value="https://drive.google.com/drive/folders/1ROO9vE_eAc2UGKldO4FOEaugr_xOmfeD",
         placeholder="https://drive.google.com/drive/folders/..."
     )
     dst_folder_id = extract_folder_id(dst_input)
@@ -204,6 +204,7 @@ def get_service():
             )
             st.session_state.auth_url, _ = st.session_state.auth_flow.authorization_url(
                 prompt="consent",
+                login_hint="uday@sdichallenge.in",
                 access_type="offline"
             )
 
@@ -212,7 +213,7 @@ def get_service():
 
         st.markdown("### Step 4: Login with Google Account")
         st.markdown(f"[**Click here to authorize your Google Account**]({auth_url})")
-        st.info("Log in as **ankit.varma@iihs.ac.in**. After approving, copy the `code=` parameter from the URL bar.")
+        st.info("Log in as **uday@sdichallenge.in**. After approving, copy the `code=` parameter from the URL bar.")
         code = st.text_input("Paste the authorization code here:", type="password", key="oauth_auth_code")
 
         if code:
@@ -243,6 +244,15 @@ def get_service():
 
     service = build("drive", "v3", credentials=creds)
     user = service.about().get(fields="user").execute()["user"]
+    if user["emailAddress"].lower() != "uday@sdichallenge.in":
+        st.error(f"Signed in as {user['emailAddress']}. This transfer requires uday@sdichallenge.in.")
+        if st.button("Sign out and use uday@sdichallenge.in"):
+            token_path.unlink(missing_ok=True)
+            st.session_state.pop("auth_flow", None)
+            st.session_state.pop("auth_url", None)
+            st.session_state.pop("oauth_auth_code", None)
+            st.rerun()
+        st.stop()
     st.success(f"Authenticated as **{user['displayName']}** ({user['emailAddress']})")
     return service, creds
 
